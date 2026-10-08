@@ -63,6 +63,10 @@ export const LOCAL_COMMANDS: LocalCommand[] = [
   { name: 'thinking', description: 'Toggle extended thinking display' },
   { name: 'tokens', description: 'Show session token usage' },
   { name: 'skills', description: 'List available skills' },
+  // Workspace (Chat.tsx implements both; without these entries the dispatcher
+  // treats them as unknown and forwards the line to the model)
+  { name: 'workspace', description: 'Resume, rename, or open a workspace' },
+  { name: 'home', description: 'Workspace home: manage workspaces and open their sessions' },
   // Help / exit
   { name: 'help', description: 'Show shortcuts and commands' },
   { name: 'tips', description: 'Show usage tips and shortcuts' },

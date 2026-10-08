@@ -13,6 +13,8 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir, platform } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { execFile, execFileSync, spawnSync } from "node:child_process";
 import type { AgentSession, AgentSessionRuntime, AgentSessionEvent, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { SessionManager, sessionEntryToContextMessages } from "@earendil-works/pi-coding-agent";
@@ -125,6 +127,13 @@ interface ButterPrefs {
 	splashFont?: SplashFontSetting;
 	activityFrames?: string;
 	resumeTarget?: string;
+}
+
+/** One durable workspace registration (butterpi's own ledger). */
+interface WorkspaceRecord {
+	id: string;
+	path: string;
+	title: string;
 }
 
 interface StagedImage {
@@ -255,6 +264,8 @@ export class PiChannel implements ChannelUi {
 
 	private sessionPathCache = new Map<string, string>(); // sessionId → file path
 	private history: string[] = [];
+	private workspacesPath: string;
+	private workspaces: WorkspaceRecord[] | undefined;
 	private extensionBinder?: (session: AgentSession) => Promise<unknown> | unknown;
 	private dialogs?: TuiDialogStore;
 
@@ -274,7 +285,11 @@ export class PiChannel implements ChannelUi {
 		this._session = rt.runtime.session;
 		this.prefsPath = join(this.agentDir(), "butterpi-ui.json");
 		this.prefs = this.readPrefs();
+		this.workspacesPath = join(this.agentDir(), "butterpi-workspaces.json");
 		this.loadHistory();
+		// The launch directory is always a workspace, so the home screen has a
+		// row even on a first run.
+		this.ensureWorkspace(this._session.sessionManager.getCwd());
 		this.bindSession(this._session, { replay: true });
 		this.runtime.setRebindSession?.(async (session: AgentSession) => {
 			this.bindSession(session, { replay: true });
@@ -946,45 +961,124 @@ export class PiChannel implements ChannelUi {
 		}
 	}
 
-	// ─── workspaces (single-cwd backend) ───────────────────────────────
+	// ─── workspaces ───────────────────────────────
 
+	// pi's runtime is cwd-bound: `newSession()` always reuses the current cwd.
+	// A workspace switch therefore creates a fresh session in the target
+	// directory and re-seats the runtime on it via
+	// `switchSession(path, { cwdOverride })`. The ledger persists under
+	// <agentDir>/butterpi-workspaces.json.
 	async listWorkspaces(): Promise<readonly TuiWorkspaceTarget[]> {
-		return [{ uri: this.cwd, cwd: this.cwd, label: basename(this.cwd) || this.cwd, kind: "local", badge: "local" }];
+		const records = this.loadWorkspaces();
+		const targets = records.map((w) => this.workspaceTarget(w.path));
+		if (!records.some((w) => this.workspaceKey(w.path) === this.workspaceKey(this.cwd))) {
+			targets.unshift(this.workspaceTarget(this.cwd));
+		}
+		return targets;
 	}
 
 	async listWorkspaceRegistry(): Promise<readonly TuiWorkspaceEntry[]> {
-		return [
-			{
-				id: "cwd",
-				path: this.cwd,
-				title: basename(this.cwd) || this.cwd,
-				present: existsSync(this.cwd),
-				sessionCount: 1,
-			},
-		];
+		if (!this.findWorkspace(this.cwd)) this.ensureWorkspace(this.cwd);
+		const counts = new Map<string, number>();
+		try {
+			const infos = await SessionManager.listAll();
+			for (const info of infos) {
+				const cwd = (info as { cwd?: string }).cwd;
+				if (!cwd) continue;
+				const key = this.workspaceKey(cwd);
+				counts.set(key, (counts.get(key) ?? 0) + 1);
+			}
+		} catch {
+			// An unreadable session store still yields the ledger rows.
+		}
+		return this.loadWorkspaces().map((w) => ({
+			id: w.id,
+			path: w.path,
+			title: w.title,
+			present: existsSync(w.path),
+			sessionCount: counts.get(this.workspaceKey(w.path)) ?? 0,
+		}));
 	}
 
-	async removeWorkspace(_path: string): Promise<boolean> {
-		return false;
+	async removeWorkspace(path: string): Promise<boolean> {
+		const key = this.workspaceKey(path);
+		const list = this.loadWorkspaces();
+		const index = list.findIndex((w) => this.workspaceKey(w.path) === key);
+		if (index === -1) return false;
+		list.splice(index, 1);
+		this.saveWorkspaces();
+		this.emit();
+		return true;
 	}
 
-	async renameWorkspaceAt(_path: string, _title: string): Promise<boolean> {
-		return false;
+	async renameWorkspaceAt(path: string, title: string): Promise<boolean> {
+		const record = this.findWorkspace(path);
+		const next = title.trim();
+		if (record === undefined || next === "") return false;
+		// findWorkspace returns the record by reference, so mutating it keeps
+		// the in-memory ledger and the persisted file in sync.
+		record.title = next;
+		this.saveWorkspaces();
+		this.emit();
+		return true;
 	}
 
 	async resolveWorkspace(reference: string): Promise<TuiWorkspaceTarget | undefined> {
-		const path = isAbsolute(reference) ? reference : resolve(this.cwd, reference);
-		if (!existsSync(path)) return undefined;
-		return { uri: path, cwd: path, label: basename(path) || path, kind: "local", badge: "local" };
+		const trimmed = reference.trim();
+		if (!trimmed) return undefined;
+		let path = trimmed;
+		if (path.startsWith("file://")) {
+			try {
+				path = fileURLToPath(path);
+			} catch {
+				return undefined;
+			}
+		} else if (path === "~") {
+			path = homedir();
+		} else if (path.startsWith("~/") || path.startsWith("~\\")) {
+			path = join(homedir(), path.slice(2));
+		}
+		const abs = isAbsolute(path) ? resolve(path) : resolve(this.cwd, path);
+		try {
+			if (!statSync(abs).isDirectory()) return undefined;
+		} catch {
+			return undefined;
+		}
+		return this.workspaceTarget(abs);
 	}
 
-	async switchWorkspace(_target: TuiWorkspaceTarget): Promise<boolean> {
-		this.notify("Workspace switching is not supported by the pi backend — restart butterpi in that directory", { color: "warning" });
-		return false;
+	async switchWorkspace(target: TuiWorkspaceTarget): Promise<boolean> {
+		const nextCwd = target.cwd ? resolve(target.cwd) : "";
+		if (!nextCwd || !existsSync(nextCwd)) {
+			this.notify(`Workspace not found: ${target.cwd || "(empty)"}`, { color: "error" });
+			return false;
+		}
+		try {
+			if (this.workspaceKey(nextCwd) === this.workspaceKey(this.cwd)) {
+				const result = await this.runtime.newSession();
+				if (result.cancelled) return false;
+			} else {
+				const created = SessionManager.create(nextCwd, this.opts.sessionDir);
+				const file = created.getSessionFile();
+				if (!file) {
+					this.notify("Could not create a session for this workspace", { color: "error" });
+					return false;
+				}
+				const result = await this.runtime.switchSession(file, { cwdOverride: nextCwd });
+				if (result.cancelled) return false;
+			}
+			this.ensureWorkspace(nextCwd);
+			this.notify(`Workspace: ${basename(nextCwd) || nextCwd}`, { timeoutMs: 2000 });
+			this.emit();
+			return true;
+		} catch (err) {
+			this.notify(`Workspace switch failed: ${err instanceof Error ? err.message : String(err)}`, { color: "error" });
+			return false;
+		}
 	}
 
-	async renameWorkspace(_title: string): Promise<boolean> {
-		return false;
+	async renameWorkspace(title: string): Promise<boolean> {
+		return this.renameWorkspaceAt(this.cwd, title);
 	}
 
 	workspaceCommands(): readonly Pick<TuiWorkspaceCommand, "name" | "aliases" | "description">[] {
@@ -993,6 +1087,66 @@ export class PiChannel implements ChannelUi {
 
 	async runWorkspaceCommand(_name: string, _input: string): Promise<TuiWorkspaceCommandResult | undefined> {
 		return undefined;
+	}
+
+	// workspace ledger helpers (see the section comment above)
+
+	private workspaceKey(path: string): string {
+		const abs = resolve(path);
+		return platform() === "win32" ? abs.toLowerCase() : abs;
+	}
+
+	private loadWorkspaces(): WorkspaceRecord[] {
+		if (this.workspaces !== undefined) return this.workspaces;
+		let list: WorkspaceRecord[] = [];
+		try {
+			const raw = JSON.parse(readFileSync(this.workspacesPath, "utf8")) as unknown;
+			if (Array.isArray(raw)) {
+				list = raw.filter(
+					(entry): entry is WorkspaceRecord =>
+						typeof entry === "object" &&
+						entry !== null &&
+						typeof (entry as WorkspaceRecord).id === "string" &&
+						typeof (entry as WorkspaceRecord).path === "string" &&
+						typeof (entry as WorkspaceRecord).title === "string",
+				);
+			}
+		} catch {
+			// Missing/corrupt ledger starts empty; the launch cwd reseeds it.
+		}
+		this.workspaces = list;
+		return list;
+	}
+
+	private saveWorkspaces(): void {
+		try {
+			mkdirSync(dirname(this.workspacesPath), { recursive: true });
+			writeFileSync(this.workspacesPath, JSON.stringify(this.workspaces ?? [], null, 2));
+		} catch {}
+	}
+
+	private findWorkspace(path: string): WorkspaceRecord | undefined {
+		const key = this.workspaceKey(path);
+		return this.loadWorkspaces().find((w) => this.workspaceKey(w.path) === key);
+	}
+
+	private ensureWorkspace(path: string, title?: string): WorkspaceRecord {
+		const existing = this.findWorkspace(path);
+		if (existing) return existing;
+		const abs = resolve(path);
+		const record: WorkspaceRecord = {
+			id: randomUUID(),
+			path: abs,
+			title: title?.trim() || basename(abs) || abs,
+		};
+		this.loadWorkspaces().push(record);
+		this.saveWorkspaces();
+		return record;
+	}
+
+	private workspaceTarget(path: string): TuiWorkspaceTarget {
+		const abs = resolve(path);
+		return { uri: abs, cwd: abs, label: basename(abs) || abs, kind: "local", badge: "local" };
 	}
 
 	// ─── model / effort ────────────────────────────────────────────────
