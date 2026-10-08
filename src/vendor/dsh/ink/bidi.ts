@@ -57,14 +57,23 @@ export function reorderBidi(characters: ClusteredChar[]): ClusteredChar[] {
     return characters
   }
 
-  // Build a plain string from the clustered chars to run through bidi
-  const plainText = characters.map(c => c.value).join('')
-
-  // Check if there are any RTL characters — skip bidi if pure LTR
-  if (!hasRTLCharacters(plainText)) {
+  // Fast RTL pre-scan over the clustered values. Windows (and WSL/VS Code)
+  // run this for EVERY rendered line, so build no joined copy and run no
+  // regex: the RTL scripts we reorder are all BMP, so a code-unit range
+  // check is exact and allocates nothing. The joined string is only built
+  // once RTL is actually present.
+  let hasRtl = false
+  for (let i = 0; i < characters.length; i++) {
+    if (hasRTLCodeUnit(characters[i]!.value)) {
+      hasRtl = true
+      break
+    }
+  }
+  if (!hasRtl) {
     return characters
   }
 
+  const plainText = characters.map(c => c.value).join('')
   const bidi = getBidi()
   const { levels } = bidi.getEmbeddingLevels(plainText, 'auto')
 
@@ -127,15 +136,17 @@ function reverseRangeNumbers(arr: number[], start: number, end: number): void {
 }
 
 /**
- * Quick check for RTL characters (Hebrew, Arabic, and related scripts).
- * Avoids running the full bidi algorithm on pure-LTR text.
+ * True when `value` contains a code unit in an RTL block. Every script this
+ * renderer reorders (Hebrew, Arabic, Syriac, Thaana, NKo, Samaritan, Mandaic)
+ * is BMP, so a code-unit scan is exact and allocation-free — the hot path on
+ * Windows, where terminals lack native bidi and every line is checked.
  */
-function hasRTLCharacters(text: string): boolean {
-  // Hebrew: U+0590-U+05FF, U+FB1D-U+FB4F
-  // Arabic: U+0600-U+06FF, U+0750-U+077F, U+08A0-U+08FF, U+FB50-U+FDFF, U+FE70-U+FEFF
-  // Thaana: U+0780-U+07BF
-  // Syriac: U+0700-U+074F
-  return /[\u0590-\u05FF\uFB1D-\uFB4F\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF\u0780-\u07BF\u0700-\u074F]/u.test(
-    text,
-  )
+function hasRTLCodeUnit(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    const c = value.charCodeAt(i)
+    if (c >= 0x0590 && c <= 0x08ff) return true // Hebrew → Arabic Extended-A
+    if (c >= 0xfb1d && c <= 0xfdff) return true // Arabic Presentation Forms-A
+    if (c >= 0xfe70 && c <= 0xfeff) return true // Arabic Presentation Forms-B
+  }
+  return false
 }

@@ -13,7 +13,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir, platform } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { execFileSync, execSync, spawnSync } from "node:child_process";
+import { execFile, execFileSync, spawnSync } from "node:child_process";
 import type { AgentSession, AgentSessionRuntime, AgentSessionEvent, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { SessionManager, sessionEntryToContextMessages } from "@earendil-works/pi-coding-agent";
 import type { TuiDialogStore } from "./vendor/dsh/dsh-adapter/dialogs.js";
@@ -247,6 +247,7 @@ export class PiChannel implements ChannelUi {
 	private _lastUserText = "";
 	private _gitBranch: string | undefined;
 	private gitTimer: ReturnType<typeof setInterval> | undefined;
+	private gitRefreshing = false;
 
 	private stagedImages = new Map<string, { image: StagedImage; transcript: TranscriptImage }>();
 	private stageSeq = 0;
@@ -1778,7 +1779,7 @@ export class PiChannel implements ChannelUi {
 			} catch (err) {
 				return { kind: "error", text: `Failed to export session: ${err instanceof Error ? err.message : "Unknown error"}`, consumeDraft: true };
 			}
-			const auth = spawnSync("gh", ["auth", "status"], { encoding: "utf-8" });
+			const auth = spawnSync("gh", ["auth", "status"], { encoding: "utf-8", windowsHide: true });
 			if (auth.error) {
 				return { kind: "error", text: "GitHub CLI (gh) is not installed. Install it from https://cli.github.com/", consumeDraft: true };
 			}
@@ -1786,7 +1787,7 @@ export class PiChannel implements ChannelUi {
 				return { kind: "error", text: "GitHub CLI is not logged in. Run 'gh auth login' first.", consumeDraft: true };
 			}
 			this.notify("Creating gist…", { timeoutMs: 15_000 });
-			const result = spawnSync("gh", ["gist", "create", "--public=false", htmlFile], { encoding: "utf-8", timeout: 60_000 });
+			const result = spawnSync("gh", ["gist", "create", "--public=false", htmlFile], { encoding: "utf-8", timeout: 60_000, windowsHide: true });
 			if (result.error || result.status !== 0) {
 				return { kind: "error", text: `Failed to create gist: ${result.stderr?.trim() || result.error?.message || "Unknown error"}`, consumeDraft: true };
 			}
@@ -2527,7 +2528,7 @@ export class PiChannel implements ChannelUi {
 	}
 
 	/** Re-project the live assistant message's content blocks into a row group. */
-	private projectAssistantBlocks(message: AssistantMessage, ctx: { live: boolean; streaming: boolean }): void {
+	private projectAssistantBlocks(message: AssistantMessage, ctx: { live: boolean; streaming: boolean }, activeIndex?: number): void {
 		const content = message.content ?? [];
 		if (this.groupStart === -1 || !ctx.live) {
 			// History or first sight of this message: project wholesale, appended at end.
@@ -2574,8 +2575,19 @@ export class PiChannel implements ChannelUi {
 			const prevKind = this.groupRowIds[i];
 			if (block.type === "toolCall") {
 				const b = block as { id: string; name: string; arguments?: unknown };
-				const row = this.ensureToolRowDetached(b.id, b.name, (b.arguments ?? {}) as Record<string, unknown>);
-				if (row.tool) row.tool = { ...row.tool, argsText: previewText(JSON.stringify(b.arguments ?? {}), 400) };
+				const args = (b.arguments ?? {}) as Record<string, unknown>;
+				const row = this.ensureToolRowDetached(b.id, b.name, args);
+				// `message_update` hands us the WHOLE partial message on every
+				// delta, so re-serializing every tool call each token (the old
+				// behavior) is pure waste — for a large write/edit payload it
+				// dominated the streaming frame on slower machines. Only the
+				// block this event actually targeted needs re-serializing; the
+				// rest are already settled. History replay (activeIndex undefined)
+				// still refreshes all of them once.
+				if (row.tool && (activeIndex === undefined || activeIndex === i)) {
+					const next = previewText(JSON.stringify(args), 400);
+					if (next !== row.tool.argsText) row.tool = { ...row.tool, argsText: next };
+				}
 				newRows.push(row);
 				newIds.push("tool");
 				return;
@@ -2660,9 +2672,9 @@ export class PiChannel implements ChannelUi {
 			case "message_update": {
 				const message = e.message as AssistantMessage;
 				if (message.role !== "assistant") break;
-				const ev = e.assistantMessageEvent as { type: string; delta?: string; partial?: AssistantMessage };
+				const ev = e.assistantMessageEvent as { type: string; delta?: string; partial?: AssistantMessage; contentIndex?: number };
 				const partial = (ev.partial ?? message) as AssistantMessage;
-				this.projectAssistantBlocks(partial, { live: true, streaming: true });
+				this.projectAssistantBlocks(partial, { live: true, streaming: true }, ev.contentIndex);
 				if (ev.type === "text_delta" && typeof ev.delta === "string") {
 					this._responseChars += ev.delta.length;
 					const now = Date.now();
@@ -2819,21 +2831,33 @@ export class PiChannel implements ChannelUi {
 		}, 0);
 	}
 
+	/**
+	 * Refresh the git branch without blocking the event loop.
+	 *
+	 * This used to run `execSync("git ...")`, which spawns a shell plus git and
+	 * BLOCKS Node for its entire lifetime (~50–300ms on Windows). The Ink
+	 * renderer and input handling share that event loop, so the poll surfaced
+	 * as a periodic freeze every 5s — the classic "Windows feels laggy"
+	 * symptom. `execFile` skips the shell (no cmd.exe on Windows) and the async
+	 * form never stalls a frame. Overlapping polls are dropped, and
+	 * `windowsHide` avoids a flashing console window for the child.
+	 */
 	private refreshGitBranch(): void {
-		try {
-			const out = execSync("git rev-parse --abbrev-ref HEAD", { cwd: this.cwd, timeout: 1000, stdio: ["ignore", "pipe", "ignore"] })
-				.toString()
-				.trim();
-			if (out && out !== this._gitBranch) {
-				this._gitBranch = out;
-				this.emit();
-			}
-		} catch {
-			if (this._gitBranch !== undefined) {
-				this._gitBranch = undefined;
-				this.emit();
-			}
-		}
+		if (this.gitRefreshing) return;
+		this.gitRefreshing = true;
+		execFile(
+			"git",
+			["--no-optional-locks", "rev-parse", "--abbrev-ref", "HEAD"],
+			{ cwd: this.cwd, timeout: 2000, windowsHide: true, encoding: "utf8" },
+			(err, stdout) => {
+				this.gitRefreshing = false;
+				const next = err ? undefined : String(stdout).trim() || undefined;
+				if (next !== this._gitBranch) {
+					this._gitBranch = next;
+					this.emit();
+				}
+			},
+		);
 	}
 
 	// ─── prefs / history persistence ───────────────────────────────────
