@@ -144,9 +144,13 @@ function reverseRangeNumbers(arr: number[], start: number, end: number): void {
 function hasRTLCodeUnit(value: string): boolean {
   for (let i = 0; i < value.length; i++) {
     const c = value.charCodeAt(i)
-    if (c >= 0x0590 && c <= 0x08ff) return true // Hebrew → Arabic Extended-A
-    if (c >= 0xfb1d && c <= 0xfdff) return true // Arabic Presentation Forms-A
-    if (c >= 0xfe70 && c <= 0xfeff) return true // Arabic Presentation Forms-B
+    // Exactly the original regex's ranges (no over-detection):
+    // Hebrew, Arabic, Syriac and Thaana; Arabic Extended-A;
+    // Arabic Presentation Forms-A and -B.
+    if (c >= 0x0590 && c <= 0x07bf) return true
+    if (c >= 0x08a0 && c <= 0x08ff) return true
+    if (c >= 0xfb1d && c <= 0xfdff) return true
+    if (c >= 0xfe70 && c <= 0xfeff) return true
   }
   return false
 }
