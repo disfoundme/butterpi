@@ -292,6 +292,20 @@ export function supportsWin32InputMode(
 ): boolean {
   if (platform !== 'win32') return false
 
+  // Explicit override (butterpi aliases BUTTERPI_WIN32_INPUT onto this name)
+  // so a user can A/B the input encoding without rebuilding.
+  const override = process.env.DSH_TUI_WIN32_INPUT
+  if (override === '0' || override === 'false' || override === 'off') return false
+  if (override === '1' || override === 'true' || override === 'on') return true
+
+  // Windows Terminal advertises the Kitty keyboard protocol (see
+  // supportsExtendedKeys) and reports modified Enter as CSI 13;2u there. Its
+  // ConPTY win32-input-mode round-trip is heavier per keystroke and is the
+  // usual source of "typing feels laggy" reports, so prefer the lighter kitty
+  // path on WT. Classic conhost has no kitty support and still needs
+  // win32-input-mode for modified Enter.
+  if (process.env.WT_SESSION) return false
+
   const version = coerce(termProgramVersion)
   const isEmbeddedXtermJs =
     termProgram === 'vscode' && version !== null && version.major >= 5
