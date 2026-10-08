@@ -1,0 +1,9 @@
+{
+  "name": "@deepseek-ai/dsh-llm",
+  "version": "0.0.0-stub",
+  "type": "module",
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "description": "Permissive stub for butterpi vendored dsh-TUI build. Not a real implementation.",
+  "private": true
+}

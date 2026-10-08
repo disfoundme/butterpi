@@ -1,0 +1,39 @@
+{
+  // Single-config build for app code + vendored dsh-TUI renderer.
+  // CHOICE: one tsconfig with `moduleResolution: bundler` + `jsx: react-jsx`
+  // covers both butterpi's own code (explicit .js ESM suffixes are valid under
+  // bundler resolution and match the emitted file names) and the vendored
+  // dsh-TUI sources (which use .js-suffixed relative imports + JSX). A second
+  // NodeNext config for src/ was unnecessary and would have split the module
+  // graph; the vendored code is upstream third-party, so its compiler flags
+  // are relaxed below exactly as dsh-TUI's own tsconfig does.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2024"],
+    "jsx": "react-jsx",
+    "outDir": "dist",
+    "rootDir": "src",
+    // Vendored third-party code was written against real upstream types; the
+    // permissive stubs would trip strictNullChecks/implicit-any everywhere,
+    // so the whole tree compiles with strict off (same spirit as dsh-TUI's
+    // own relaxed-flag block).
+    "strict": true,
+    // Relaxed flags for vendored third-party renderer (same set dsh-TUI uses):
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "noImplicitAny": false,
+    "noUncheckedIndexedAccess": false,
+    "exactOptionalPropertyTypes": false,
+    "noImplicitOverride": false,
+    "noFallthroughCasesInSwitch": false,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "declaration": false,
+    "sourceMap": true,
+    "resolveJsonModule": true,
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx"]
+}

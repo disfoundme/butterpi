@@ -1,0 +1,210 @@
+import type { AssistantStreamFrame, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import type { Context } from '@deepseek-ai/cordis'
+import type { InputConvergence } from './input-actions.js'
+import type { ChannelBinding } from './binding.js'
+import type { ChannelOwner } from './owner.js'
+import { type createChannelProjection } from './projection.js'
+import { isTokenDelta, tokenDeltaChars } from './usage.js'
+import type { ChannelState } from './types.js'
+
+/**
+ * The binding event router is the sole subscriber for a foreground Agent.
+ * It captures the binding generation at every listener entry; teardown is
+ * incremental and retained callbacks check that captured Agent/session pair
+ * before touching state. Transcript presentation remains exclusively owned by
+ * ChannelProjection.
+ */
+export function createBindingEvents(ctx: Context, deps: {
+  owner: ChannelOwner
+  binding: ChannelBinding
+  state: ChannelState
+  /** Read the activity projection's current value for a freshly bound session.
+   *  A projection value only arrives when it changes, so a resumed or
+   *  reattached session needs this read to show its line before the next event.
+   *  The line's semantics live in the working-activity plugin: this app folds
+   *  nothing itself and forwards no events. */
+  seedActivity?(session: unknown): void
+  inputConvergence: InputConvergence
+  selection: ModelSelectionRef
+  modelActions: { applyPreferredEffort(): Promise<void>; selection: ModelSelectionRef }
+  modeActions: { refreshMode(): void; onSessionEvent(session: unknown, event: unknown): void }
+  projector: ReturnType<typeof createChannelProjection>
+  subagents: { onSessionEvent(session: unknown, event: unknown): boolean; onStreamFrame?(agent: unknown, frame: AssistantStreamFrame): boolean; onParentEvent?(event: unknown): void; onStart(info: { id: string; runId?: string; provider: string; local?: boolean }): void; onEnd(info: { id: string; runId?: string; stopReason: string; lastAssistantMessage?: unknown[] }): void }
+  agentView: { schedule(): void }
+  messageObserver?: { publish(session: unknown, event: unknown): void }
+  /** Drop a pre-step attachment registered by this channel for one message id
+   *  (input-delivery's `retireAttachment`); see the discard hook below.
+   *  Optional for direct/embed constructors that never emit inbox discards;
+   *  channel.ts always wires it. */
+  retireAttachment?(messageId: string): void
+}) {
+  const reconcileRetiredProjection = (status: 'idle' | 'disposed'): void => {
+    if (!deps.state.working) return
+    ctx.logger.warn(`dsh-tui: agent became ${status} while the channel still projected an open turn; releasing volatile UI gates`)
+    deps.inputConvergence.cancelInFlight = false
+    deps.state.cancelPending = false
+    deps.state.working = false
+    deps.state.activeToolCount = 0
+    deps.projector.settleStreaming()
+    deps.projector.updateSpinnerMode()
+  }
+
+  const bind = (): void => {
+    try {
+      deps.state.agentBindingGeneration = deps.binding.bind()
+      deps.inputConvergence.cancelInFlight = false
+      deps.inputConvergence.interruptSeq += 1
+      deps.seedActivity?.(deps.binding.agent.session)
+      deps.modelActions.selection.current = undefined
+      deps.modelActions.selection.assembled = undefined
+      if (deps.binding.agent.options?.model === undefined && deps.state.provider !== '' && deps.state.model !== '') {
+        deps.modelActions.selection.current = { provider: deps.state.provider, model: deps.state.model }
+      }
+      void deps.modelActions.applyPreferredEffort()
+      deps.modeActions.refreshMode()
+      const capture = deps.binding.capture()
+      const session = capture.agent.session
+      const current = (): boolean => deps.owner.current() && deps.binding.isCurrent(capture)
+      const register = <T extends () => void>(dispose: T): T => {
+        deps.binding.subscribe(dispose)
+        return dispose
+      }
+      const on = (...args: Parameters<typeof ctx.on>): ReturnType<typeof ctx.on> => register(ctx.on(...args))
+
+      // Keep the upstream assembly/request pairing, but own each listener as
+      // soon as it is installed. The upstream combined disposer is too late
+      // if request registration throws, and its post-await assembly write is
+      // unsafe after a rebind (including A→B→A ABA).
+      const disposeAssembly = capture.agent.ctx.on('system-prompt/assemble', async (_assembly, _context, next) => {
+        const selected = deps.selection.current
+        const assembled = await next()
+        if (!current()) return assembled
+        deps.selection.assembled = selected
+        if (selected === undefined) return assembled
+        return {
+          ...assembled,
+          variables: {
+            ...assembled.variables,
+            provider: selected.provider,
+            model: selected.model,
+          },
+        }
+      })
+      register(disposeAssembly)
+      const disposeRequest = capture.agent.ctx.on('agent/request', async (_payload, next) => {
+        const resolved = await next()
+        if (!current()) return resolved
+        const selected = deps.selection.assembled
+        if (selected === undefined) return resolved
+        const { reasoningEffort: _inheritedEffort, ...withoutInheritedEffort } = resolved
+        return {
+          ...withoutInheritedEffort,
+          provider: selected.provider,
+          model: selected.model,
+          ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort }),
+        }
+      })
+      register(disposeRequest)
+      on('agent/status', ({ agent: subject, status }) => {
+        if (!current() || subject !== capture.agent) return
+        deps.state.status = status
+        if (status === 'idle') reconcileRetiredProjection('idle')
+        deps.state.emit()
+      })
+      on('agent/disposed', ({ agent: subject }) => {
+        if (!current() || subject !== capture.agent) return
+        deps.state.status = 'disposed'
+        reconcileRetiredProjection('disposed')
+        deps.state.emit()
+      })
+      /**
+       * The inbox removed one message. Both events retire the pending
+       * preview, but ONLY a discard retires an attached-context entry:
+       * `agent/inbox/claimed` fires while the loop claims the batch, BEFORE
+       * the resident `agent/pre-step` listener can append the attachment —
+       * retiring there would delete the context before it is ever injected
+       * (dsh-agent-loop: `inbox.claim()` → claimed event → `agent/pre-step`).
+       */
+      const retirePending = (payload: { agent: unknown; message: { id?: unknown } }, alsoRetireAttachment = false): void => {
+        if (!current() || payload.agent !== capture.agent) return
+        const messageId = payload.message?.id
+        if (typeof messageId !== 'string') return
+        if (alsoRetireAttachment) deps.retireAttachment?.(messageId)
+        const before = deps.state.pending.length
+        deps.state.pending = deps.state.pending.filter(item => item.id !== messageId)
+        if (deps.state.pending.length !== before) deps.state.emit()
+      }
+      on('agent/inbox/claimed', retirePending)
+      on('agent/inbox/discarded', payload => retirePending(payload, true))
+      on('session/event', (subject, event) => {
+        if (!current()) return
+        const isMainSession = subject === session
+        if (!isMainSession && deps.subagents.onSessionEvent(subject, event)) return
+        if (!isMainSession) return
+        deps.messageObserver?.publish(subject, event)
+        // Parent-log discovery events (`subagent/catalog`, workflow member
+        // edges) reach the dashboard through the same firehose; they are not
+        // transcript rows and render below remains untouched by them.
+        deps.subagents.onParentEvent?.(event)
+        deps.modeActions.onSessionEvent(subject, event)
+        deps.projector.renderEvent(event)
+        if (event.type === 'assistant/chunk') deps.state.emitStream()
+        else deps.state.emit()
+      })
+      // 0.1.5 live streaming: per-token chunks are transient attempt frames
+      // on this agent-scoped channel; the durable settlement still arrives
+      // through `session/event` above. Pre-0.1.5 hosts never emit it — the
+      // subscription simply stays silent there and chunks keep arriving as
+      // `assistant/chunk` session events.
+      on('agent/assistant-stream', ({ agent: subject, frame }) => {
+        if (!current()) return
+        if (subject !== capture.agent) {
+          deps.subagents.onStreamFrame?.(subject, frame)
+          return
+        }
+        deps.projector.renderStreamFrame(frame)
+        if (frame.type === 'chunk') deps.state.emitStream()
+        else if (frame.type === 'end') deps.state.emit()
+      })
+      on('subagent/start' as never, (info: { id: string; runId?: string; provider: string; local?: boolean }) => {
+        if (current()) deps.subagents.onStart(info)
+      })
+      on('subagent/end' as never, (info: { id: string; stopReason: string; lastAssistantMessage?: unknown[] }) => {
+        if (current()) deps.subagents.onEnd(info)
+      })
+      /**
+       * Live compaction progress. The summarizer is one `ctx.llm.stream()`
+       * call, so its chunks are the only work signal a compaction has between
+       * `compaction/start` and `compaction/end` (dsh-llm tags the call
+       * `purpose: 'compaction'`, and a manual one runs while the session is
+       * idle, so it cannot be confused with the foreground turn's stream).
+       * Everything else passes through untouched: the original iterable is
+       * returned for any other purpose or session.
+       */
+      const disposeCompactionStream = ctx.on('llm/stream', (options, next) => {
+        const stream = next()
+        if (options.purpose !== 'compaction') return stream
+        if (options.sessionId === undefined || String(options.sessionId) !== String(session.id)) return stream
+        return (async function* compactionStream() {
+          for await (const chunk of stream) {
+            const compaction = deps.state.compaction
+            if (compaction !== undefined && isTokenDelta(chunk)) {
+              deps.state.compaction = {
+                ...compaction,
+                phase: 'summary',
+                outputChars: compaction.outputChars + tokenDeltaChars(chunk),
+              }
+              deps.state.emitStream()
+            }
+            yield chunk
+          }
+        })()
+      })
+      register(disposeCompactionStream)
+    } catch (error) {
+      deps.owner.dispose()
+      throw error
+    }
+  }
+  return { bind }
+}

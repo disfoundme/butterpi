@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Logs
+*.log
+npm-debug.log*
+
+# Local env / secrets
+.env
+.env.*
+!.env.example
+
+# Test coverage
+coverage/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
