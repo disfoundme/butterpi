@@ -134,6 +134,11 @@ interface ImageTokenSpan {
 
 /** Every `[Image #N]` in `text`, in order. */
 function imageTokenSpans(text: string): ImageTokenSpan[] {
+  // Fast path: most drafts hold no staged-image token at all, and this runs
+  // several times per keystroke (setInput, the caret-preview commit effect,
+  // and once per rendered row). `matchAll` would walk the whole string each
+  // time — a substring probe settles it in O(n) with no regex machinery.
+  if (!text.includes('[Image #')) return []
   const spans: ImageTokenSpan[] = []
   for (const match of text.matchAll(COMPOSER_IMAGE_TOKEN)) {
     const start = match.index ?? 0
@@ -297,12 +302,40 @@ function vimWordEnd(text: string, cursor: number): number {
 
 /** Ascending grapheme boundary offsets of `text` (starts at 0, ends at
  *  `text.length`). Empty text yields `[0]`. */
+// Single-entry memo: a keystroke segments the same draft several times (the
+// useInput handler, setInput's caret normalization, then several render-time
+// caret/selection passes). The segmenter walk is the expensive part, so
+// reuse it while the text is unchanged. One retained string is harmless —
+// the composer already holds the full draft.
+let graphemeBoundaryCacheKey: string | null = null
+let graphemeBoundaryCacheValue: number[] = [0]
 function graphemeBoundaries(text: string): number[] {
-  const bounds = [0]
-  for (const { index, segment } of getGraphemeSegmenter().segment(text)) {
-    const end = index + segment.length
-    if (end > bounds[bounds.length - 1]!) bounds.push(end)
+  if (text === graphemeBoundaryCacheKey) return graphemeBoundaryCacheValue
+  // Fast path: pure-ASCII text with no CR (the overwhelming majority of
+  // typing) has one grapheme per code unit, so the boundary list is just
+  // 0..n and the Intl.Segmenter walk can be skipped entirely. CR is excluded
+  // because a CRLF pair is a single grapheme cluster.
+  let ascii = true
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i)
+    if (c > 0x7f || c === 0x0d) {
+      ascii = false
+      break
+    }
   }
+  let bounds: number[]
+  if (ascii) {
+    bounds = new Array<number>(text.length + 1)
+    for (let i = 0; i <= text.length; i++) bounds[i] = i
+  } else {
+    bounds = [0]
+    for (const { index, segment } of getGraphemeSegmenter().segment(text)) {
+      const end = index + segment.length
+      if (end > bounds[bounds.length - 1]!) bounds.push(end)
+    }
+  }
+  graphemeBoundaryCacheKey = text
+  graphemeBoundaryCacheValue = bounds
   return bounds
 }
 
@@ -1144,9 +1177,15 @@ export function PromptInput({
     // Apply the same ingress normalization to fills/history/editor results as
     // to paste. Map the requested caret through the sanitized prefix so an
     // ANSI sequence removed before it cannot leave the caret past the text.
-    const sanitizedCursor = sanitizeEditableText(next.slice(0, cursorOffset)).length
-    next = sanitizeEditableText(next)
-    cursorOffset = sanitizedCursor
+    const sanitized = sanitizeEditableText(next)
+    if (sanitized !== next) {
+      // Slow path only when control bytes were actually present: map the
+      // requested caret through the sanitized prefix so an ANSI sequence
+      // removed before it cannot leave the caret past the text.
+      const sanitizedCursor = sanitizeEditableText(next.slice(0, cursorOffset)).length
+      next = sanitized
+      cursorOffset = sanitizedCursor
+    }
     const prev = valueRef.current
     const prevCursor = cursorRef.current
     const block = foldBlockRef.current
@@ -3071,6 +3110,7 @@ export function PromptInput({
    * the empty-input caret (appended after everything, so a selection
    * ending there cannot swallow it).
    */
+  const renderImageSpans = boundImageSpans(value)
   const rowHighlightPieces = (
     text: string,
     absoluteLine: number,
@@ -3085,7 +3125,7 @@ export function PromptInput({
     const fill = (lo: number, hi: number, kind: number): void => {
       for (let i = Math.max(lo, 0); i < Math.min(hi, text.length); i++) kinds[i] = kind
     }
-    const spans = boundImageSpans(value)
+    const spans = renderImageSpans
     for (const span of spans) fill(span.start - rowStart, span.end - rowStart, CHIP)
     const sel = selection
     if (sel) fill(sel.start - rowStart, sel.end - rowStart, INVERSE)
@@ -3933,11 +3973,26 @@ export function PromptInput({
  * the row overflows; hard-wrap a word that cannot fit; never split a
  * cluster (ZWJ emoji, combining sequences, CJK wide cells stay whole).
  */
+const wrapRowsCache = new Map<number, Map<string, Array<{ start: number; end: number }>>>()
+const WRAP_ROWS_CACHE_MAX = 128
 function wrapLineRows(
   line: string,
   width: number,
 ): Array<{ start: number; end: number }> {
   if (line === '') return [{ start: 0, end: 0 }]
+  // Bounded per-width memo. A single keystroke wraps the draft several times
+  // (wrapToWidth, visualLineRanges, caretInText), and while the agent streams
+  // Chat re-renders this composer at ~60fps with the draft unchanged — without
+  // the memo every one of those frames re-runs the Intl.Segmenter +
+  // stringWidth walk over the whole draft. Rows are read-only, so sharing is
+  // safe.
+  let byLine = wrapRowsCache.get(width)
+  if (byLine === undefined) {
+    byLine = new Map()
+    wrapRowsCache.set(width, byLine)
+  }
+  const cached = byLine.get(line)
+  if (cached !== undefined) return cached
   const rows: Array<{ start: number; end: number }> = []
   const segmenter = getGraphemeSegmenter()
   // The space inside `[Image #N]` is not a break opportunity: the token is
@@ -3968,6 +4023,8 @@ function wrapLineRows(
     if (segment === ' ' && imageTokenAround(unbreakable, offset) === undefined) lastBreak = offset
   }
   rows.push({ start: rowStart, end: offset })
+  if (byLine.size >= WRAP_ROWS_CACHE_MAX) byLine.clear()
+  byLine.set(line, rows)
   return rows
 }
 
