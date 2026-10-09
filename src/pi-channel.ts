@@ -20,6 +20,7 @@ import type { AgentSession, AgentSessionRuntime, AgentSessionEvent, SessionEntry
 import { SessionManager, sessionEntryToContextMessages } from "@earendil-works/pi-coding-agent";
 import type { TuiDialogStore } from "./vendor/dsh/dsh-adapter/dialogs.js";
 import { codingAgentDistPath } from "./internals.js";
+import { estimateTps, TPS_WINDOW_MS } from "./tps.js";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, ImageContent, TextContent } from "@earendil-works/pi-ai";
 import type {
@@ -2289,6 +2290,8 @@ export class PiChannel implements ChannelUi {
 		this._compaction = undefined;
 		this._activeToolCount = 0;
 		this._responseChars = 0;
+		this.tpsWindow = [];
+		this._tpsSamples = [];
 		this._working = session.isStreaming;
 		this._sessionTitle = session.sessionName ?? "";
 		this._tokens = {
@@ -2858,13 +2861,17 @@ export class PiChannel implements ChannelUi {
 					this._responseChars += ev.delta.length;
 					const now = Date.now();
 					this.tpsWindow.push({ t: now, chars: ev.delta.length });
-					while (this.tpsWindow.length > 0 && now - this.tpsWindow[0]!.t > 3000) this.tpsWindow.shift();
-					const span = Math.max(1, now - this.tpsWindow[0]!.t);
-					const tps = (this.tpsWindow.reduce((a, b) => a + b.chars, 0) / span) * 1000;
-					const last = this._tpsSamples.at(-1);
-					if (!last || now - last.at > 500) this._tpsSamples.push({ tps, at: now });
-					else last.tps = tps;
-					if (this._tpsSamples.length > 60) this._tpsSamples.shift();
+					while (this.tpsWindow.length > 0 && now - this.tpsWindow[0]!.t > TPS_WINDOW_MS) this.tpsWindow.shift();
+					// The stream carries characters, not tokens (dsh estimates ~4
+					// chars/token) and a just-drained window has no interval yet, so
+					// estimateTps refuses rather than spiking to thousands of "tps".
+					const tps = estimateTps(this.tpsWindow, now);
+					if (tps !== undefined) {
+						const last = this._tpsSamples.at(-1);
+						if (!last || now - last.at > 500) this._tpsSamples.push({ tps, at: now });
+						else last.tps = tps;
+						if (this._tpsSamples.length > 60) this._tpsSamples.shift();
+					}
 				}
 				this.emitStream();
 				break;
