@@ -31,11 +31,11 @@ function fakeChannel(): FakeChannel {
   }
 }
 
-function project(ch: FakeChannel, content: unknown[], streaming: boolean): void {
+function project(ch: FakeChannel, content: unknown[], streaming: boolean, activeIndex?: number): void {
   const message = { role: 'assistant', content, timestamp: 0 }
   ;(PiChannel.prototype as unknown as {
     projectAssistantBlocks: (m: unknown, ctx: unknown, activeIndex?: number) => void
-  }).projectAssistantBlocks.call(ch, message, { live: true, streaming })
+  }).projectAssistantBlocks.call(ch, message, { live: true, streaming }, activeIndex)
 }
 
 test('a streaming reasoning row keeps its id across deltas', () => {
@@ -66,4 +66,17 @@ test('settling keeps the id and clears streaming', () => {
   project(ch, [{ type: 'thinking', thinking: 'reason' }], false)
   assert.equal(ch.rowList[0]!.id, firstId)
   assert.equal(ch.rowList[0]!.streaming, false)
+})
+
+test('a settled reasoning row stops streaming once a later block is active', () => {
+  const ch = fakeChannel()
+  // First sight (wholesale): reasoning is the active block.
+  project(ch, [{ type: 'thinking', thinking: 'reason' }], true, 0)
+  assert.equal(ch.rowList[0]!.streaming, true)
+  // The model moves on to text; the live update settles the reasoning block.
+  project(ch, [{ type: 'thinking', thinking: 'reason' }, { type: 'text', text: 'answer' }], true, 1)
+  const reasoning = ch.rowList.find(row => row.kind === 'reasoning')!
+  const assistant = ch.rowList.find(row => row.kind === 'assistant')!
+  assert.equal(reasoning.streaming, false, 'settled reasoning must stop its spinner')
+  assert.equal(assistant.streaming, true, 'the active text block keeps streaming')
 })

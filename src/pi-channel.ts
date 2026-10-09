@@ -2790,7 +2790,11 @@ export class PiChannel implements ChannelUi {
 				id: reuse ? previousRow.id : this.rowSeq++,
 				kind,
 				text,
-				streaming: ctx.streaming,
+				// Only the block this update targeted is still streaming: a settled
+				// reasoning block must stop its animated spinner once the model moves
+				// on to text/a tool (upstream c4c08097), or it keeps repainting the
+				// transcript (and flickering) for the rest of the message.
+				streaming: ctx.streaming && (activeIndex === undefined || activeIndex === i),
 				fresh: true,
 				time: message.timestamp,
 			});
