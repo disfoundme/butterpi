@@ -21,6 +21,8 @@ export interface ButterOptions {
 	noContextFiles?: boolean;
 	systemPrompt?: string;
 	appendSystemPrompt?: string;
+	/** Suppress the frontend's own system-prompt capability notes (e.g. mermaid rendering). */
+	noHarnessNotes?: boolean;
 	extensionPaths: string[];
 	themePaths: string[];
 	skillPaths: string[];
@@ -136,6 +138,9 @@ export function parseArgs(argv: string[]): ButterOptions {
 			case a === "--append-system-prompt":
 				opts.appendSystemPrompt = eatValue(args, i, a);
 				i++;
+				break;
+			case a === "--no-harness-notes":
+				opts.noHarnessNotes = true;
 				break;
 			case a === "--extension" || a === "--extensions":
 				opts.extensionPaths.push(...eatValue(args, i, a).split(","));

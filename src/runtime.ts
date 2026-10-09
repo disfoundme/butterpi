@@ -21,6 +21,7 @@ import {
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai";
 import { isAbsolute, resolve } from "node:path";
+import { butterpiAppendSystemPrompt } from "./harness-notes.js";
 import type { ButterOptions } from "./options.js";
 
 export interface ButterRuntime {
@@ -91,7 +92,7 @@ export async function createRuntime(opts: ButterOptions): Promise<ButterRuntime>
 				noThemes: false,
 				noContextFiles: opts.noContextFiles,
 				systemPrompt: opts.systemPrompt,
-				appendSystemPrompt: opts.appendSystemPrompt ? [opts.appendSystemPrompt] : undefined,
+				appendSystemPrompt: butterpiAppendSystemPrompt(opts),
 			},
 		});
 		const { settingsManager, modelRuntime } = services;

@@ -90,6 +90,13 @@ modules (`theme.js`, `keybindings.js`, built-in tool renderers) by file URL at r
 (`src/internals.ts`). Theme/keybinding singletons are registered on both the app's and
 pi's nested `pi-tui` copies.
 
+Because it renders what the model emits, butterpi appends a short capability note to
+the model's system prompt — Markdown, tables, LaTeX math (`$…$` / `$$…$$`) and
+Mermaid fenced blocks drawn as box-drawing art — so models actually use those forms.
+It is scoped to butterpi's own runtime and never touches the `pi` CLI or its global
+config; `--append-system-prompt` still applies alongside it, and `--no-harness-notes`
+turns the note off.
+
 ## Known limitations
 
 - Print/JSON/RPC modes are not implemented — butterpi is interactive-only; use `pi -p` for scripting.
