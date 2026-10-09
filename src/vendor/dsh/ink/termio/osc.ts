@@ -3,6 +3,10 @@
  */
 
 import { Buffer } from 'buffer'
+import { randomUUID } from 'node:crypto'
+import { unlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { env } from '../../utils/env.js'
 import { execFileNoThrow } from '../../utils/execFileNoThrow.js'
 import { BEL, ESC, ESC_TYPE, SEP } from './ansi.js'
@@ -243,10 +247,54 @@ function copyNative(text: string): void {
       return
     }
     case 'win32':
-      // clip.exe is always available on Windows. Unicode handling is
-      // imperfect (system locale encoding) but good enough for a fallback.
-      void execFileNoThrow('clip', [], opts)
+      copyWindowsNative(text)
       return
+  }
+}
+
+/**
+ * Windows native clipboard write.
+ *
+ * `clip.exe` — and PowerShell reading piped stdin — decode piped bytes with
+ * the console code page, so the UTF-8 written here comes back as mojibake on
+ * non-ASCII selections. Hand PowerShell a UTF-8 file and have it decode
+ * explicitly instead: the same fix pi uses for WSL interop. OSC 52 is still
+ * emitted by setClipboard() as the primary path; this is the local safety net.
+ */
+function copyWindowsNative(text: string): void {
+  const tmpFile = join(tmpdir(), `butterpi-clip-${randomUUID()}.txt`)
+  try {
+    writeFileSync(tmpFile, text, { encoding: 'utf8', mode: 0o600 })
+  } catch {
+    return
+  }
+  const { file, args } = windowsClipboardCommand(tmpFile)
+  void execFileNoThrow(file, args, { useCwd: false, timeout: 5000 }).finally(() => {
+    try {
+      unlinkSync(tmpFile)
+    } catch {
+      // Already gone (or the file was never created).
+    }
+  })
+}
+
+/**
+ * The PowerShell invocation that loads the clipboard from a UTF-8 file.
+ * Split out so the command shape (explicit UTF-8 decode, no pipe) is testable
+ * without Windows.
+ * @param tmpFile - absolute Windows path of the UTF-8 payload file.
+ * @returns the executable and argv to spawn.
+ */
+export function windowsClipboardCommand(tmpFile: string): { file: string; args: string[] } {
+  const escaped = tmpFile.replaceAll("'", "''")
+  return {
+    file: 'powershell.exe',
+    args: [
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      `Set-Clipboard -Value ([System.IO.File]::ReadAllText('${escaped}', [System.Text.Encoding]::UTF8))`,
+    ],
   }
 }
 
