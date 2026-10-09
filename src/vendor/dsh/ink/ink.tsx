@@ -2503,7 +2503,18 @@ export default class Ink {
     } else {
       updateSelection(sel, col, row);
     }
-    this.notifySelectionChange();
+    // Drag motion is a high-frequency stream (the OS reports 100+ moves/s
+    // while the button is held). notifySelectionChange() renders NOW, so a
+    // drag used to repaint — full-damage, because a selection is active —
+    // once per motion event, which is what made dragging feel slow. Coalesce
+    // the paint through the frame throttle instead; only the discrete
+    // changes (press, release, copy, clear) stay immediate. The selection
+    // listeners are still notified: they only flip a boolean, so React bails
+    // out unless the selection actually appeared or disappeared.
+    this.scheduleRender();
+    for (const cb of this.selectionListeners) {
+      callWithUpdateOverflowGuard('selection.notify', cb);
+    }
   }
 
   // Methods to properly suspend stdin for external editor usage
