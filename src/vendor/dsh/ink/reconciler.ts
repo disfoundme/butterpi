@@ -511,6 +511,13 @@ const reconciler = createReconciler<
   },
   startSuspendingCommit(): void {},
   suspendInstance(): void {},
+  // react-reconciler 0.34 (React 19.3) calls this host hook unconditionally on
+  // commits with non-Sync lanes; without the member any Suspense resume throws
+  // "suspendOnActiveViewTransition is not a function". This renderer does not
+  // implement ViewTransition, so a no-op matches react-dom with no active
+  // transition. @types/react-reconciler here predates the member.
+  // @ts-ignore -- runtime/type-definition mismatch
+  suspendOnActiveViewTransition(): void {},
   waitForCommitToBeReady(): null {
     return null
   },

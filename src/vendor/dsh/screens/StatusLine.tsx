@@ -452,7 +452,10 @@ const selectionBadge = formatSelectionBadge(channel.selection)
     activity.phase !== 'idle'
   const showTrajectory = statusBar.trajectory && wake !== undefined
 
-  const barWidth = columns - 4
+  // The root Box below paints paddingX={1} inside width={columns}, so the
+  // content area is `columns - 2` cells wide — size the bar from the same
+  // arithmetic or its right edge falls 2 columns short of the status row's.
+  const barWidth = columns - 2
   const barColors: { freeFill: Color; freeText: Color } | undefined =
     themeName === 'light'
       ? undefined
@@ -659,8 +662,14 @@ function buildHoverDetail(
       if (usage === undefined || rate === undefined) return null
       return (
         <Text wrap="truncate">
-          {dim('cache ')}{rate} · {dim('read ')}{formatTokens(usage.cacheRead)} ·{' '}
-          {dim('write ')}{formatTokens(usage.cacheWrite)} · {dim('input ')}{formatTokens(usage.input)}
+          {dim('cache ')}{rate}
+          {usage.cacheRead > 0
+            ? <>{' · '}{dim('read ')}{formatTokens(usage.cacheRead)}</>
+            : null}
+          {usage.cacheWrite > 0
+            ? <>{' · '}{dim('write ')}{formatTokens(usage.cacheWrite)}</>
+            : null}
+          {' · '}{dim('input ')}{formatTokens(usage.input)}
         </Text>
       )
     }

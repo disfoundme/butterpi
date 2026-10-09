@@ -257,6 +257,11 @@ export function TimelineRail({
                 flexShrink={0}
                 borderStyle="round"
                 borderColor="inactive"
+                // An opaque surface, like every other card floating over the
+                // transcript (Tooltip uses the same token). Without it the
+                // card is translucent: the rows underneath show through the
+                // padding/border columns.
+                backgroundColor="toolCardBackground"
                 paddingX={1}
                 // The card floats LEFT of the rail over selectable
                 // transcript text; fence its own rect so a drag that
