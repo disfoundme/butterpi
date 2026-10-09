@@ -25,6 +25,7 @@ import { logForDebugging } from '../utils/debug.js'
 import { createHyperlink } from './hyperlink.js'
 import { fileLinkUrl, linkifyFilePaths, looksLikeFilePath } from '../utils/fileTarget.js'
 import { getLatexMath } from '../tuiDisplayPrefs.js'
+import { CJK_EMPHASIS_EXTENSIONS } from './cjk-emphasis.js'
 import {
   isMathBlockToken,
   isMathToken,
@@ -79,7 +80,10 @@ let markedInitialized = false
  * disabled so that `~100` renders literally instead of as deleted text —
  * models use `~` far more often for "approximate" than for real
  * strikethrough. LaTeX math becomes `math`/`mathBlock` tokens (see
- * math.ts). Every lexer caller — Markdown and StreamingMarkdown's boundary
+ * math.ts),
+ * and CJK-adjacent strong emphasis (`**标签：**中文`, unclosable under
+ * CommonMark's flanking rule) closes via cjk-emphasis.ts.
+ * Every lexer caller — Markdown and StreamingMarkdown's boundary
  * lex — must run this first so both agree on block boundaries.
  */
 export function configureMarked(): void {
@@ -92,7 +96,7 @@ export function configureMarked(): void {
         return undefined
       },
     },
-    extensions: [...MATH_MARKDOWN_EXTENSIONS],
+    extensions: [...MATH_MARKDOWN_EXTENSIONS, ...CJK_EMPHASIS_EXTENSIONS],
   })
 }
 
@@ -151,6 +155,13 @@ interface RenderState {
   readonly listDepth: number
   /** Ordinal of the current ordered-list item, or null for unordered lists. */
   readonly ordinal: number | null
+  /**
+   * Rendered task checkbox of the enclosing tight list item ('[x] ' with
+   * styling). marked lifts the checkbox to a sibling token ahead of the
+   * text there; renderListItem stashes it here so it lands between the
+   * bullet and the body (loose items keep it inline in their paragraph).
+   */
+  readonly taskMark?: string
 }
 
 /** A fresh context for block-level children: list state reset, no parent. */
@@ -230,6 +241,7 @@ function isToken<K extends MarkedToken['type']>(
 /** Fan-out point: narrows the token union, then delegates to the per-type render functions. */
 function dispatch(token: Token, state: RenderState): string {
   if (isToken(token, 'blockquote')) return renderBlockquote(token, state)
+  if (isToken(token, 'checkbox')) return renderCheckbox(token)
   if (isToken(token, 'code')) return renderCodeBlock(token, state)
   if (isToken(token, 'codespan')) return renderCodeSpan(token)
   if (isToken(token, 'em')) return renderEmphasis(token, state)
@@ -254,8 +266,12 @@ function dispatch(token: Token, state: RenderState): string {
     // representation.
     return ''
   }
-  // Unknown / extension token types render as nothing.
-  return ''
+  // Unknown / extension token types: fail closed. A marked upgrade or a
+  // plugin extension that introduces a new token shape must not silently
+  // swallow content; echo the raw source so the user still sees it and the
+  // debug log flags the gap until an explicit renderer lands.
+  logForDebugging(`Markdown token without a renderer, echoing raw source: ${token.type}`)
+  return (token as { raw?: string }).raw ?? ''
 }
 
 /** Inline math as single-line Unicode; the exact source when it has none
@@ -306,7 +322,17 @@ function renderCodeBlock(token: Tokens.Code, state: RenderState): string {
         )
       }
     }
-    return state.highlight.highlight(token.text, { language, theme: buildSyntaxTheme(theme) })
+    try {
+      return state.highlight.highlight(token.text, { language, theme: buildSyntaxTheme(theme) })
+    } catch (error) {
+      // A highlighter that throws synchronously (a broken grammar, an
+      // unloadable language) must not take the whole message down; fall back
+      // to the plain source for this block.
+      logForDebugging(
+        `Syntax highlighter threw, rendering plaintext: ${error instanceof Error ? error.message : String(error)}`,
+      )
+      return token.text
+    }
   }
   // Strip ALL trailing newlines: trailing blank lines would otherwise leak a
   // stray blank line at the end of the block.
@@ -379,11 +405,33 @@ function renderList(token: Tokens.List, state: RenderState): string {
 
 function renderListItem(token: Tokens.ListItem, state: RenderState): string {
   const indent = '  '.repeat(state.listDepth)
+  // Tight task items carry their checkbox as a sibling token AHEAD of the
+  // text token (loose items inline it inside the paragraph). Lift it out
+  // here and hand it to renderText: otherwise the checkbox would render on
+  // its own line before the bullet instead of between bullet and body.
+  const isTightTask = token.task === true && token.tokens[0]?.type === 'checkbox'
+  const children = isTightTask ? token.tokens.slice(1) : token.tokens
   const childState = withParent(
-    { ...state, listDepth: state.listDepth + 1 },
+    {
+      ...state,
+      listDepth: state.listDepth + 1,
+      taskMark: isTightTask ? renderCheckbox(token.tokens[0] as Tokens.Checkbox) : '',
+    },
     token,
   )
-  return token.tokens.map(child => indent + dispatch(child, childState)).join('')
+  return children.map(child => indent + dispatch(child, childState)).join('')
+}
+
+/**
+ * Task checkbox as width-safe ASCII: literal [x] / [ ] keeps its state
+ * through display, copy, and ANSI-stripping measurements alike; a styled
+ * glyph pair would not survive every terminal font. The trailing space is
+ * the separator to the item text.
+ */
+function renderCheckbox(token: Tokens.Checkbox): string {
+  const mark = token.checked ? '[x]' : '[ ]'
+  const color = token.checked ? getActiveTheme().success : getActiveTheme().subtle
+  return colorize(mark, color, 'foreground') + ' '
 }
 
 function renderParagraph(token: Tokens.Paragraph, state: RenderState): string {
@@ -407,7 +455,7 @@ function renderText(token: Tokens.Text, state: RenderState): string {
     // Blue bullet marker: list structure gets a tint without loading the
     // whole item (kimi-style `•` in the accent color).
     const tinted = colorize(bullet, getActiveTheme().permission, 'foreground')
-    return `${tinted} ${body}${EOL}`
+    return `${tinted} ${state.taskMark ?? ''}${body}${EOL}`
   }
 
   return linkifyText(token.text)

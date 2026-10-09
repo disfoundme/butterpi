@@ -152,7 +152,16 @@ function tokenizeInlineMath(source: string): MathToken | undefined {
  */
 const BLOCK_OPENER = /^ {0,3}(\$\$|\\\[)/
 
+/**
+ * The source the block tokenizer last saw. marked tries block extensions at
+ * each block position before cutting a paragraph, then calls `start` with
+ * that same source minus its first character; `start` needs the whole
+ * paragraph (its first character may open a code span).
+ */
+let lastBlockSource = ''
+
 function tokenizeBlockMath(source: string): MathToken | undefined {
+  lastBlockSource = source
   const opener = BLOCK_OPENER.exec(source)
   if (opener === null) return undefined
   const dollar = opener[1] === '$$'
@@ -174,14 +183,74 @@ function tokenizeBlockMath(source: string): MathToken | undefined {
   return { type: 'mathBlock', raw: source, text: body, pending: true }
 }
 
+/**
+ * Backtick runs that can act as CommonMark code-span delimiters, in order.
+ * A run preceded by an odd number of backslashes is escaped and stays literal
+ * text, so it neither opens nor closes a span.
+ */
+function backtickRuns(text: string): string[] {
+  const runs: string[] = []
+  for (const match of text.matchAll(/`+/g)) {
+    const start = match.index
+    let backslashes = 0
+    while (start - backslashes - 1 >= 0 && text[start - backslashes - 1] === '\\') backslashes++
+    if (backslashes % 2 === 0) runs.push(match[0])
+  }
+  return runs
+}
+
+/**
+ * Lengths of the backtick runs in `text` that no later run of the same
+ * length closes (CommonMark: such a run is literal text, for now).
+ */
+function unmatchedBacktickRuns(text: string): number[] {
+  const runs = backtickRuns(text)
+  const unmatched: number[] = []
+  for (let open = 0; open < runs.length; open++) {
+    let close = open + 1
+    while (close < runs.length && runs[close]!.length !== runs[open]!.length) close++
+    if (close < runs.length) open = close
+    else unmatched.push(runs[open]!.length)
+  }
+  return unmatched
+}
+
+/**
+ * Whether position `at` of `text` (a candidate block opener) lies inside a
+ * code span: a backtick run opens a span only when a run of exactly the same
+ * length closes it later in the same paragraph (CommonMark); a run with no
+ * closer is literal text and opens nothing.
+ */
+function insideOpenCodeSpan(text: string, at: number): boolean {
+  const paragraphStart = text.lastIndexOf('\n\n', at)
+  const before = text.slice(paragraphStart < 0 ? 0 : paragraphStart + 2, at)
+  const open = unmatchedBacktickRuns(before)
+  if (open.length === 0) return false
+  const rest = text.slice(at)
+  const paragraphEnd = rest.search(/\n[ \t]*\n/)
+  const after = paragraphEnd < 0 ? rest : rest.slice(0, paragraphEnd)
+  const closers = new Set(backtickRuns(after).map(run => run.length))
+  return open.some(length => closers.has(length))
+}
+
 /** Tokenizer extensions for `marked.use({ extensions })`. */
 export const MATH_MARKDOWN_EXTENSIONS: readonly TokenizerExtension[] = [
   {
     name: 'mathBlock',
     level: 'block',
     start(source) {
-      const match = /(?:^|\n) {0,3}(?:\$\$|\\\[)/.exec(source)
-      return match ? match.index + (match[0].startsWith('\n') ? 1 : 0) : undefined
+      // Same block position: exactly one character longer (a full string
+      // comparison here would cost O(remaining text) per paragraph).
+      const paragraph = lastBlockSource.length === source.length + 1 ? lastBlockSource : source
+      const offset = paragraph.length - source.length
+      const opener = /(?:^|\n) {0,3}(?:\$\$|\\\[)/g
+      for (let match = opener.exec(source); match !== null; match = opener.exec(source)) {
+        const index = match.index + (match[0].startsWith('\n') ? 1 : 0)
+        // A code span may run across lines; a block opener inside one is
+        // code, and cutting the paragraph there would split the span.
+        if (!insideOpenCodeSpan(paragraph, index + offset)) return index
+      }
+      return undefined
     },
     tokenizer: tokenizeBlockMath,
   },
