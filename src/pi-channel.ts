@@ -947,6 +947,27 @@ export class PiChannel implements ChannelUi {
 			await this.runtime.switchSession(path);
 			return { ok: true };
 		} catch (err) {
+			// The session's recorded cwd is gone (the project was moved/renamed,
+			// or the session came from another machine). pi refuses to open it
+			// without an override; re-home it to a directory the user picks,
+			// mirroring /import, instead of failing the resume outright. This is
+			// exactly the cross-workspace case where the session list shows a
+			// workspace whose directory no longer exists.
+			if (err instanceof Error && err.name === "MissingSessionCwdError") {
+				if (!this.dialogs) return { ok: false, reason: "failed", error: err.message };
+				const selected = (await this.askInput("Session cwd missing", "Enter working directory for this session (empty = current)")) ?? "";
+				const chosen = selected.trim();
+				const cwdOverride = chosen ? this.expandPath(chosen) : this.cwd;
+				if (!existsSync(cwdOverride) || !statSync(cwdOverride).isDirectory()) {
+					return { ok: false, reason: "failed", error: `Not a directory: ${cwdOverride}` };
+				}
+				try {
+					await this.runtime.switchSession(path, { cwdOverride });
+					return { ok: true };
+				} catch (err2) {
+					return { ok: false, reason: "failed", error: err2 instanceof Error ? err2.message : String(err2) };
+				}
+			}
 			return { ok: false, reason: "failed", error: err instanceof Error ? err.message : String(err) };
 		}
 	}
@@ -1921,6 +1942,21 @@ export class PiChannel implements ChannelUi {
 
 	private askInput(title: string, placeholder?: string): Promise<string | undefined> {
 		return this.dialogs!.ask({ kind: "input", title, placeholder, initial: "" }).then((v) => (typeof v === "string" ? v : undefined));
+	}
+
+	/** Expand `~`, a file:// URL, or a cwd-relative path to an absolute path. */
+	private expandPath(reference: string): string {
+		const trimmed = reference.trim();
+		if (trimmed.startsWith("file://")) {
+			try {
+				return fileURLToPath(trimmed);
+			} catch {
+				return trimmed;
+			}
+		}
+		if (trimmed === "~") return homedir();
+		if (trimmed.startsWith("~/") || trimmed.startsWith("~\\")) return join(homedir(), trimmed.slice(2));
+		return isAbsolute(trimmed) ? resolve(trimmed) : resolve(this.cwd, trimmed);
 	}
 
 	/** pi /share: export the branch to HTML and upload it as a secret gist. */
