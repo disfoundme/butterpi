@@ -1,0 +1,14 @@
+{
+  // Test build: compiles src + test together so the tests can import the
+  // application modules with the same `.js`-suffixed ESM specifiers the app
+  // uses. Emits to `dist-test/` (gitignored) so the shipped `dist/` stays
+  // exactly the app. `rootDir` widens to the repo root because `test/` sits
+  // beside `src/`.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "dist-test",
+    "sourceMap": false
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx", "test/**/*.ts"]
+}

@@ -5,6 +5,9 @@ node_modules/
 dist/
 *.tsbuildinfo
 
+# Test build output
+dist-test/
+
 # Logs
 *.log
 npm-debug.log*
