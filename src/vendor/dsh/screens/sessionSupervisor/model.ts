@@ -83,6 +83,26 @@ export function samePath(left: string, right: string): boolean {
 }
 
 /**
+ * The rail row whose sessions the pane should show.
+ *
+ * A row is matched by PATH rather than id: a directory is rendered as a
+ * cwd-derived fallback row while the ledger is still loading and then as a
+ * registry row once it lands — the same directory under two different ids — so
+ * only the path identifies the user's choice across that transition. It is also
+ * the one key every row carries.
+ * @param railEntries - The rail rows, registry ones first.
+ * @param selectedPath - The picked row path, if any.
+ * @returns The row to show, or undefined when the rail is empty.
+ */
+export function resolveSelectedRailEntry(
+  railEntries: readonly RailEntry[],
+  selectedPath: string | undefined,
+): RailEntry | undefined {
+  return railEntries.find(entry =>
+    selectedPath !== undefined && samePath(entry.path, selectedPath)) ?? railEntries[0]
+}
+
+/**
  * Case-insensitive substring match over the fields a person searches by.
  *
  * Title and label are the obvious ones; the working directory and branch are

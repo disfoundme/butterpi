@@ -22,7 +22,7 @@ import { readSessionOwners, type SessionMountOwner } from '../../sessionMounts.j
 import type { SessionSummary } from '../../dsh-adapter/sessions/index.js'
 import type { TuiWorkspaceEntry, TuiWorkspaceTarget } from '../../workspaces.js'
 import type { ChannelUi as Channel } from '../../adapter/channel/ui-policy.js'
-import { RAIL_CHROME_ROWS, WORKSPACE_ROW_LINES, RAIL_MIN_TOTAL_COLUMNS, RAIL_WIDTH_MIN, RAIL_WIDTH_MAX, SESSION_ROW_LINES, SESSION_PANE_CHROME_ROWS, MenuAction, MENU_ACTIONS, MENU_WIDTH, MENU_HEIGHT, MENU_LABEL_KEYS, SupervisorLiveState, RailEntry, UNREGISTERED_RAIL_ID, message, samePath, sessionMatchesQuery } from './model.js'
+import { RAIL_CHROME_ROWS, WORKSPACE_ROW_LINES, RAIL_MIN_TOTAL_COLUMNS, RAIL_WIDTH_MIN, RAIL_WIDTH_MAX, SESSION_ROW_LINES, SESSION_PANE_CHROME_ROWS, MenuAction, MENU_ACTIONS, MENU_WIDTH, MENU_HEIGHT, MENU_LABEL_KEYS, SupervisorLiveState, RailEntry, UNREGISTERED_RAIL_ID, message, samePath, resolveSelectedRailEntry, sessionMatchesQuery } from './model.js'
 
 /**
  * The last successful listing, per channel, carried across mounts of this
@@ -432,9 +432,10 @@ export function useSessionSupervisor(input: SessionSupervisorInput) {
   }, [railEntries.length])
 
   /** The rail row whose sessions the pane is showing (or the fallback group). */
-  const selected = useMemo(() => railEntries.find(entry =>
-    selectedPath !== undefined && samePath(entry.path, selectedPath)) ?? railEntries[0],
-    [railEntries, selectedPath])
+  const selected = useMemo(
+    () => resolveSelectedRailEntry(railEntries, selectedPath),
+    [railEntries, selectedPath],
+  )
 
   /**
    * Sessions whose recorded cwd is the selected workspace, minus the search
