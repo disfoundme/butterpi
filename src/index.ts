@@ -32,7 +32,8 @@ Usage: butterpi [options] [prompt...]
       --skills <paths>     Extra skill dirs
       --prompt-templates <paths>
       --themes <paths>     Extra theme JSON files
-      --theme <name>       Theme
+      --theme <name>       Force theme: auto, dark, dark-ansi, light, or a
+                           custom name (default: detect from background)
       --system-prompt <s>  Replace system prompt
       --append-system-prompt <s>
       --no-extensions/--no-skills/--no-context-files
@@ -40,8 +41,8 @@ Usage: butterpi [options] [prompt...]
       --help, -h           Show help
       --version, -V        Version
 
-In-app: Enter send · Esc interrupt · / commands · ! bash · @ files ·
-Ctrl+P model · Shift+Tab thinking · Ctrl+O expand tools · Ctrl+Shift+F search
+In-app: Enter send · Esc interrupt · / commands · ! bash · @ files —
+run /hotkeys in-app for the full shortcut list
 `;
 
 async function main() {

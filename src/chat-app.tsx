@@ -202,6 +202,11 @@ export async function startChatApp(rt: ButterRuntime, opts: ButterOptions): Prom
 		openHomeOnBoot: false,
 	});
 	const tree = React.createElement(ThemeProvider, {
+		// --theme forces the dsh-TUI theme (highest priority in ThemeProvider's
+		// chain: prop > BUTTERPI_THEME/DSH_TUI_THEME env > persisted /theme >
+		// OSC 11 background detection). Unknown names warn and fall back to
+		// detection instead of failing boot.
+		theme: opts.theme,
 		children: React.createElement(AlternateScreen, null, React.createElement(PageMargin, null, chat)),
 	});
 	instance = await render(tree, { exitOnCtrlC: false });

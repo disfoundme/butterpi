@@ -29,16 +29,12 @@ export interface ButterOptions {
 	promptTemplatePaths: string[];
 	/** Initial prompt(s) sent after startup */
 	initialMessages: string[];
-	/** Print mode: no TUI */
-	print?: string;
 	help?: boolean;
 	version?: boolean;
 	/** Trusted cwd override like pi's --no-ask-style flags are handled via settings; keep simple */
 	trust?: boolean;
-	/** --theme */
+	/** --theme: force the dsh-TUI theme (auto, dark, dark-ansi, light, or a custom name) */
 	theme?: string;
-	/** --update-check disabled flag */
-	noUpdateCheck?: boolean;
 	/** leftover args (forwarded to extensions' flag values unsupported; collected for errors) */
 	extra: string[];
 }
@@ -164,15 +160,16 @@ export function parseArgs(argv: string[]): ButterOptions {
 				i++;
 				break;
 			case a === "--print":
-				opts.print = args[i + 1] ?? "";
-				if (args[i + 1] !== undefined) i++;
-				break;
+				// Parsed on purpose so the error is explicit instead of the flag
+				// silently swallowing a value and starting the TUI anyway.
+				throw new Error("--print is not supported; butterpi is interactive-only — use `pi -p` for non-interactive runs");
 			case a === "--trust":
 				opts.trust = true;
 				break;
 			case a === "--no-update-check":
-				opts.noUpdateCheck = true;
-				break;
+				// butterpi never phones home, so there is nothing to disable.
+				// Reject explicitly rather than silently accepting a no-op.
+				throw new Error("--no-update-check is not needed; butterpi performs no update checks");
 			default:
 				if (a.startsWith("-")) {
 					opts.extra.push(a);
