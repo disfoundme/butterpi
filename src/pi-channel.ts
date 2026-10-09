@@ -2754,7 +2754,6 @@ export class PiChannel implements ChannelUi {
 		const newRows: ChatRow[] = [];
 		const newIds: string[] = [];
 		content.forEach((block, i) => {
-			const prevKind = this.groupRowIds[i];
 			if (block.type === "toolCall") {
 				const b = block as { id: string; name: string; arguments?: unknown };
 				const args = (b.arguments ?? {}) as Record<string, unknown>;
@@ -2779,9 +2778,16 @@ export class PiChannel implements ChannelUi {
 			const text = block.type === "thinking" ? ((block as { thinking?: string }).thinking ?? "") : ((block as { text?: string }).text ?? "");
 			if (kind === "reasoning" && !text) return;
 			if (kind === "assistant" && !text && !ctx.streaming) return;
-			const reuse = prevKind === kind && i < newIds.length;
+			// Reuse the id of the row already at this output position when its
+			// kind matches, so React keeps the row mounted across streaming
+			// updates. The old `i < newIds.length` was never true (newIds never
+			// grows past i), so every delta handed out fresh ids: each row
+			// remounted, resetting the thinking spinner and the streaming-markdown
+			// anchors, which read as transcript flicker — worst on Windows Terminal.
+			const previousRow = this.rowList[this.groupStart + newIds.length];
+			const reuse = previousRow !== undefined && previousRow.kind === kind;
 			newRows.push({
-				id: reuse ? this.rowList[this.groupStart + newIds.length]!.id : this.rowSeq++,
+				id: reuse ? previousRow.id : this.rowSeq++,
 				kind,
 				text,
 				streaming: ctx.streaming,
