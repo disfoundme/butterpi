@@ -232,7 +232,7 @@ export function useSessionSupervisor(input: SessionSupervisorInput) {
    * selecting a group is a way to SEE those sessions, never a way to register a
    * directory, so it must not create a ledger record.
    */
-  const [selectedUnregistered, setSelectedUnregistered] = useState(false)
+  const [selectedUnregisteredId, setSelectedUnregisteredId] = useState<string | undefined>(undefined)
   const [selectedPath, setSelectedPath] = useState<string | undefined>(undefined)
   /** True once the user picked a rail row by hand; see the selection effect. */
   const [selectionManual, setSelectionManual] = useState(false)
@@ -385,6 +385,7 @@ export function useSessionSupervisor(input: SessionSupervisorInput) {
   React.useEffect(() => {
     if (railEntries.length === 0) {
       if (selectedPath !== undefined && !selectionManual) setSelectedPath(undefined)
+      if (selectedUnregisteredId !== undefined && !selectionManual) setSelectedUnregisteredId(undefined)
       return
     }
     if (
@@ -394,13 +395,16 @@ export function useSessionSupervisor(input: SessionSupervisorInput) {
     ) return
     // A hand-picked fallback group stays picked while it is still on the rail.
     // Without this the group would be dropped on the very next listing pass and
-    // the sessions it was showing would vanish again.
-    if (selectionManual && selectedUnregistered
-      && railEntries.some(entry => entry.from === 'unregistered')) return
+    // the sessions it was showing would vanish again. The id, not a bare
+    // boolean, has to be carried: every pi-created directory is an unregistered
+    // group, and a boolean made the pane fall back to the FIRST one no matter
+    // which row the user had actually picked.
+    if (selectionManual && selectedUnregisteredId !== undefined
+      && railEntries.some(entry => entry.from === 'unregistered' && entry.id === selectedUnregisteredId)) return
     const here = railEntries.find(entry => entry.from === 'registry' && samePath(entry.path, channel.cwd))
     const next = here ?? railEntries[0]!
     setSelectedPath(next.from === 'registry' ? next.path : undefined)
-    setSelectedUnregistered(next.from === 'unregistered')
+    setSelectedUnregisteredId(next.from === 'unregistered' ? next.id : undefined)
     // The cursor travels with an automatic selection. It starts at 0, so
     // leaving it there while the selection lands elsewhere paints two green
     // rows — `❯` on the first record and the marker on the selected one — until
@@ -411,7 +415,7 @@ export function useSessionSupervisor(input: SessionSupervisorInput) {
       const index = railEntries.findIndex(entry => entry.id === next.id)
       return index < 0 || current === index ? current : index
     })
-  }, [railEntries, selectedPath, selectedUnregistered, selectionManual, channel.cwd])
+  }, [railEntries, selectedPath, selectedUnregisteredId, selectionManual, channel.cwd])
 
   // The cursor indexes the entry list directly (there is no `+` row in front of
   // it), so a shrinking ledger has to pull it back inside or the last row would
@@ -425,9 +429,11 @@ export function useSessionSupervisor(input: SessionSupervisorInput) {
     const registered = railEntries.find(entry =>
       entry.from === 'registry' && selectedPath !== undefined && samePath(entry.path, selectedPath))
     if (registered !== undefined) return registered
-    if (selectedUnregistered) return railEntries.find(entry => entry.from === 'unregistered')
+    if (selectedUnregisteredId !== undefined) {
+      return railEntries.find(entry => entry.from === 'unregistered' && entry.id === selectedUnregisteredId)
+    }
     return railEntries[0]
-  }, [railEntries, selectedPath, selectedUnregistered])
+  }, [railEntries, selectedPath, selectedUnregisteredId])
 
   /**
    * Sessions whose recorded cwd is the selected workspace, minus the search
@@ -530,7 +536,7 @@ export function useSessionSupervisor(input: SessionSupervisorInput) {
 
   const selectEntry = useCallback((entry: RailEntry): void => {
     setSelectedPath(entry.from === 'registry' ? entry.path : undefined)
-    setSelectedUnregistered(entry.from === 'unregistered')
+    setSelectedUnregisteredId(entry.from === 'unregistered' ? entry.id : undefined)
     setSelectionManual(true)
     setFocusSessionId(undefined)
   }, [])
